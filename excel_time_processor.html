@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Time Entry Processor</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 40px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .upload-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            text-align: center;
+        }
+        input[type="file"] {
+            margin: 10px 0;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .preview {
+            margin-top: 30px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background-color: #4472C4;
+            color: white;
+            font-weight: bold;
+        }
+        .total-row {
+            background-color: #4472C4;
+            color: white;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Excel Time Entry Processor</h1>
+        
+        <div class="upload-section">
+            <h3>Upload your Excel file</h3>
+            <input type="file" id="fileInput" accept=".xlsx,.xls" />
+            <br>
+            <button id="processBtn" disabled>Process File</button>
+            <button id="downloadBtn" disabled>Download Processed Excel</button>
+        </div>
+        
+        <div id="status"></div>
+        
+        <div class="preview" id="preview"></div>
+    </div>
+
+    <script>
+        let processedData = null;
+        let workbook = null;
+
+        const fileInput = document.getElementById('fileInput');
+        const processBtn = document.getElementById('processBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusDiv = document.getElementById('status');
+        const previewDiv = document.getElementById('preview');
+
+        fileInput.addEventListener('change', function(e) {
+            if (e.target.files.length > 0) {
+                processBtn.disabled = false;
+                downloadBtn.disabled = true;
+                statusDiv.innerHTML = '';
+                previewDiv.innerHTML = '';
+            }
+        });
+
+        processBtn.addEventListener('click', processFile);
+        downloadBtn.addEventListener('click', downloadFile);
+
+        async function processFile() {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            try {
+                statusDiv.innerHTML = '<div class="success">Processing file...</div>';
+                
+                const data = await file.arrayBuffer();
+                const wb = XLSX.read(data, { type: 'array', cellDates: true });
+                const sheetName = wb.SheetNames[0];
+                const sheet = wb.Sheets[sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(sheet);
+
+                processedData = processTimeEntries(jsonData);
+                
+                workbook = createWorkbook(processedData);
+                
+                displayPreview(processedData);
+                
+                statusDiv.innerHTML = '<div class="success">File processed successfully! You can now download the result.</div>';
+                downloadBtn.disabled = false;
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="error">Error processing file: ${error.message}</div>`;
+                console.error(error);
+            }
+        }
+
+        function processTimeEntries(data) {
+            const entries = [];
+
+            data.forEach(row => {
+                if (!row.From || !row['Booked on'] || row.Duration === undefined) return;
+
+                let fromDate;
+                if (typeof row.From === 'string') {
+                    fromDate = new Date(row.From);
+                } else {
+                    fromDate = new Date(row.From);
+                }
+                
+                const dateOnly = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate());
+                const dateStr = formatDateForOutput(dateOnly);
+
+                const bookedOn = String(row['Booked on'] || '');
+                const parts = bookedOn.split('>');
+                const client = parts[0].trim();
+                
+                const matterMatch = bookedOn.match(/\d{5}-\d{4}/);
+                const matterNumber = matterMatch ? ' ' + matterMatch[0] : '';
+
+                const duration = parseFloat(row.Duration) || 0;
+                const comment = String(row.Comment || '').trim();
+
+                entries.push({
+                    date: dateOnly,
+                    dateStr: dateStr,
+                    client: client,
+                    matterNumber: matterNumber,
+                    duration: duration,
+                    comment: comment
+                });
+            });
+
+            const grouped = {};
+            entries.forEach(entry => {
+                const key = `${entry.dateStr}|${entry.matterNumber}|${entry.comment}`;
+                if (!grouped[key]) {
+                    grouped[key] = {
+                        date: entry.date,
+                        dateStr: entry.dateStr,
+                        client: entry.client,
+                        matterNumber: entry.matterNumber,
+                        comment: entry.comment,
+                        duration: 0
+                    };
+                }
+                grouped[key].duration += entry.duration;
+            });
+
+            const combined = Object.values(grouped).map(entry => ({
+                ...entry,
+                time: Math.ceil(entry.duration * 10) / 10
+            }));
+
+            combined.sort((a, b) => a.date - b.date);
+
+            const result = [];
+            const dateGroups = {};
+            
+            combined.forEach(entry => {
+                if (!dateGroups[entry.dateStr]) {
+                    dateGroups[entry.dateStr] = [];
+                }
+                dateGroups[entry.dateStr].push(entry);
+            });
+
+            Object.keys(dateGroups).sort((a, b) => {
+                return new Date(a) - new Date(b);
+            }).forEach(dateStr => {
+                const dayEntries = dateGroups[dateStr];
+                dayEntries.forEach(entry => {
+                    result.push({
+                        Date: entry.dateStr,
+                        'CM#': entry.matterNumber,
+                        Client: entry.client + ' ',
+                        Narrative: entry.comment,
+                        Time: entry.time
+                    });
+                });
+
+                const totalTime = dayEntries.reduce((sum, entry) => sum + entry.time, 0);
+                result.push({
+                    Date: dateStr + ' Total',
+                    'CM#': '',
+                    Client: '',
+                    Narrative: '',
+                    Time: Math.round(totalTime * 10) / 10,
+                    isTotal: true
+                });
+            });
+
+            return result;
+        }
+
+        function formatDateForOutput(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        function createWorkbook(data) {
+            const wsData = [
+                ['Date', 'CM#', 'Client', 'Narrative', 'Time']
+            ];
+
+            data.forEach(row => {
+                if (row.isTotal) {
+                    wsData.push([row.Date, '', '', '', row.Time]);
+                } else {
+                    wsData.push([row.Date, row['CM#'], row.Client, row.Narrative, row.Time]);
+                }
+            });
+
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+            const range = XLSX.utils.decode_range(ws['!ref']);
+            
+            if (!ws['!cols']) ws['!cols'] = [];
+            ws['!cols'][0] = { wch: 18 };
+            ws['!cols'][1] = { wch: 12 };
+            ws['!cols'][2] = { wch: 25 };
+            ws['!cols'][3] = { wch: 60 };
+            ws['!cols'][4] = { wch: 10 };
+
+            for (let C = range.s.c; C <= range.e.c; ++C) {
+                const address = XLSX.utils.encode_col(C) + "1";
+                if (!ws[address]) continue;
+                if (!ws[address].s) ws[address].s = {};
+                ws[address].s = {
+                    font: { bold: true },
+                    fill: { fgColor: { rgb: "FFFF00" } },
+                    alignment: { horizontal: "left", vertical: "top" }
+                };
+            }
+
+            let row = 2;
+            data.forEach((entry) => {
+                if (entry.isTotal) {
+                    for (let C = range.s.c; C <= range.e.c; ++C) {
+                        const address = XLSX.utils.encode_col(C) + row;
+                        if (ws[address]) {
+                            if (!ws[address].s) ws[address].s = {};
+                            ws[address].s = {
+                                font: { bold: true },
+                                fill: { fgColor: { rgb: "FFFF00" } },
+                                alignment: { horizontal: "left", vertical: "top" }
+                            };
+                        }
+                    }
+                }
+                row++;
+            });
+
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Timeline");
+            
+            return wb;
+        }
+
+        function displayPreview(data) {
+            let html = '<h3>Preview</h3><table>';
+            html += '<thead><tr><th>Date</th><th>CM#</th><th>Client</th><th>Narrative</th><th>Time</th></tr></thead>';
+            html += '<tbody>';
+            
+            data.forEach(row => {
+                const rowClass = row.isTotal ? ' class="total-row"' : '';
+                html += `<tr${rowClass}>`;
+                html += `<td>${row.Date}</td>`;
+                html += `<td>${row['CM#'] || ''}</td>`;
+                html += `<td>${row.Client || ''}</td>`;
+                html += `<td>${row.Narrative || ''}</td>`;
+                html += `<td>${row.Time}</td>`;
+                html += '</tr>';
+            });
+            
+            html += '</tbody></table>';
+            previewDiv.innerHTML = html;
+        }
+
+        function downloadFile() {
+            if (!workbook) return;
+            
+            const fileName = 'processed_time_entries.xlsx';
+            XLSX.writeFile(workbook, fileName);
+            statusDiv.innerHTML = '<div class="success">File downloaded successfully!</div>';
+        }
+    </script>
+</body>
+</html>
